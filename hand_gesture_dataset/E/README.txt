@@ -1,0 +1,2 @@
+Place E sign language images in this folder.
+Supported formats: .jpg, .jpeg, .png
