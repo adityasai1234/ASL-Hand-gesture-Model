@@ -1,0 +1,8 @@
+It looks like you're missing the required packages to run the hand gesture detection script. Let's create a requirements file and install the necessary packages.
+
+First, let's create a requirements.txt file:
+```python
+opencv-python>=4.5.0
+mediapipe>=0.8.9
+numpy>=1.19.0
+```
