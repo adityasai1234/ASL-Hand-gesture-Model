@@ -1,7 +1,7 @@
 import os
 import cv2
 import mediapipe as mp
-import numpy np
+import numpy as np
 import pickle
 import time
 import re
