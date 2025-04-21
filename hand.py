@@ -1,11 +1,24 @@
 import os
 import cv2
 import mediapipe as mp
-import numpy as np
+import numpy np
 import pickle
 import time
 import re
-import pyttsx3
+from gtts import gTTS
+from playsound import playsound
+
+
+def speak(text, lang='en'):
+    """Convert text to speech using gTTS and play using the laptop's speaker."""
+    try:
+        tts = gTTS(text=text, lang=lang)
+        filename = "temp_audio.mp3"
+        tts.save(filename)
+        playsound(filename)
+        os.remove(filename)
+    except Exception as e:
+        print(f"Speech error: {e}")
 
 
 class HandGestureDetector:
@@ -373,14 +386,9 @@ def main():
         model_path=model_path
     )
     
-    # Initialize the pyttsx3 engine for speech output (using the laptop's speaker)
-    engine = pyttsx3.init()
-    engine.setProperty('rate', 150)  # Adjust speaking rate if needed
-    engine.setProperty('volume', 1.0)  # Maximum volume
-
     cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     use_face_detection = False
 
     # Training mode variables
@@ -399,17 +407,18 @@ def main():
     current_sentence = ""
     current_word = ""
     last_letter = None
-    letter_confidence_threshold = 0.7
     letter_stability_count = 0
-    required_stability = 10  # Frames needed for stable detection
+    required_stability = 10  # frames needed for stable detection
     last_letter_time = time.time()
     letter_timeout = 1.0
     word_timeout = 3.0
     last_word_time = time.time()
     prev_hand_landmarks = None
 
-    # For normal mode voice output (speak only when the recognized letter changes)
+    # For normal mode voice output (speak recognized letters after a 15-sec stability period)
     last_normal_letter = None
+    stable_letter = None
+    normal_letter_start_time = None
 
     try:
         while True:
@@ -420,7 +429,7 @@ def main():
             frame = cv2.flip(frame, 1)
             results = detector.hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             
-            # Training mode
+            # ---------------- Training Mode ----------------
             if training_mode:
                 if current_letter is None and letter_index < len(letters_to_train):
                     current_letter = letters_to_train[letter_index]
@@ -473,29 +482,28 @@ def main():
                             connection_drawing_spec=detector.mp_drawing.DrawingSpec(color=(255, 255, 0), thickness=3)
                         )
                 cv2.imshow('Hand Gesture Recognition', frame)
-
-            # Sentence building mode with speech output
+            
+            # ---------------- Sentence Mode ----------------
             elif sentence_mode:
                 hands_data = detector.detect_gestures(frame)
                 output_frame = detector.draw_landmarks(frame, hands_data, results)
                 cv2.putText(output_frame, "SENTENCE MODE", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                cv2.putText(output_frame, f"Sentence: {current_sentence + current_word}", (10, output_frame.shape[0] - 50),
+                cv2.putText(output_frame, f"Sentence: {current_sentence + current_word}", (10, output_frame.shape[0]-50),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(output_frame, f"Current word: {current_word}", (10, output_frame.shape[0] - 80),
+                cv2.putText(output_frame, f"Current word: {current_word}", (10, output_frame.shape[0]-80),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 if hands_data and len(hands_data) > 0:
                     hand_data = hands_data[0]
                     landmarks = hand_data['landmarks']
+                    # Finalize a word if a flat hand gesture is detected
                     if detector._is_flat_hand(landmarks):
                         if current_word:
                             current_sentence += current_word + " "
-                            # Speak the word that was formed
-                            engine.say(current_word)
-                            engine.runAndWait()
+                            print(f"Word added. Sentence: {current_sentence}")
+                            speak(current_word)
                             current_word = ""
                             last_word_time = time.time()
-                            print(f"Word added. Sentence: {current_sentence}")
                     elif detector._is_closed_fist(landmarks):
                         if current_word:
                             current_word = current_word[:-1]
@@ -526,13 +534,22 @@ def main():
                 if current_word and current_time - last_word_time > word_timeout:
                     print(f"Auto-completing word: {current_word}")
                     current_sentence += current_word
-                    engine.say(current_word)
-                    engine.runAndWait()
+                    speak(current_word)
                     current_word = ""
                     last_word_time = current_time
+                
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('x') and current_sentence:
+                    # Speak the entire sentence without pauses
+                    sentence_to_speak = current_sentence + current_word
+                    sentence_to_speak = sentence_to_speak.strip()  # Remove trailing spaces
+                    if sentence_to_speak:
+                        print(f"Speaking full sentence: {sentence_to_speak}")
+                        speak(sentence_to_speak)
+
                 cv2.imshow('Hand Gesture Recognition', output_frame)
 
-            # Normal mode with speech output for recognized ASL letter
+            # ---------------- Normal Mode ----------------
             else:
                 hands_data = detector.detect_gestures(frame)
                 output_frame = detector.draw_landmarks(frame, hands_data, results)
@@ -546,20 +563,24 @@ def main():
                 else:
                     cv2.putText(output_frame, "ASL Recognition Active", (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(output_frame, "Press 'q' to quit, 'f' for face detection, 't' for training, 's' for sentence mode",
+                cv2.putText(output_frame, "Press 'q' to quit, 'f' for face detection, 't' for training, 's' for sentence mode, 'x' to speak sentence",
                             (10, output_frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 
-                # In normal mode, speak any recognized letter when it changes
+                # In normal mode, require 15 seconds of stability in letter detection before speaking the letter.
                 if hands_data and len(hands_data) > 0:
                     current_letter_detected = hands_data[0].get('asl_letter', None)
-                    if current_letter_detected and current_letter_detected != last_normal_letter:
-                        print(f"Speaking new letter: {current_letter_detected}")
-                        engine.say(current_letter_detected)
-                        engine.runAndWait()
-                        last_normal_letter = current_letter_detected
-                
+                    if current_letter_detected:
+                        if current_letter_detected != stable_letter:
+                            stable_letter = current_letter_detected
+                            normal_letter_start_time = time.time()
+                        else:
+                            if normal_letter_start_time is not None and (time.time() - normal_letter_start_time) >= 15:
+                                if current_letter_detected != last_normal_letter:
+                                    print(f"Speaking new letter after delay: {current_letter_detected}")
+                                    speak(current_letter_detected)
+                                    last_normal_letter = current_letter_detected
                 cv2.imshow('Hand Gesture Recognition', output_frame)
-
+                
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
@@ -602,10 +623,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# filepath: test_speech.py
-import pyttsx3
-engine = pyttsx3.init()
-engine.setProperty('rate', 150)  # Adjust speaking rate if needed
-engine.setProperty('volume', 50)  # Maximum volume
-engine.say("Hello, this is a test.")
-engine.runAndWait()
+speak("Hello, this is a test.")
