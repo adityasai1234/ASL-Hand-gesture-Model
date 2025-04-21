@@ -23,20 +23,27 @@ def speak(text, lang='en'):
 
 class HandGestureDetector:
     def __init__(self, static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5, min_tracking_confidence=0.5, model_path="hand_gesture_model.pkl"):
-        # Initialize MediaPipe Hands solution with improved parameters
+        # Optimize detection parameters
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
-            static_image_mode=static_image_mode,
-            max_num_hands=max_num_hands,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence
+            static_image_mode=False,  # Changed to always use tracking
+            max_num_hands=2,
+            min_detection_confidence=0.5,  # Reduced for faster detection
+            min_tracking_confidence=0.3,   # Reduced for better tracking
+            model_complexity=0  # Use fastest model
         )
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
 
-        # Initialize landmark smoothing
-        self.smoothing_factor = 0.5
-        self.previous_landmarks = []
+        # Optimize smoothing
+        self.smoothing_factor = 0.3  # Reduced for faster response
+        self.frame_skip = 2  # Process every nth frame
+        self.frame_count = 0
+        self.confidence_threshold = 0.4  # Reduced confidence threshold
+
+        # Add buffer for stability
+        self.detection_buffer = []
+        self.buffer_size = 3
 
         # Initialize MediaPipe Face Detection
         self.mp_face_detection = mp.solutions.face_detection
@@ -63,10 +70,31 @@ class HandGestureDetector:
             'peace': self._is_peace_sign
         }
 
+        # Add display persistence
+        self.display_persistence = 10  # frames
+        self.last_detection = None
+        self.detection_counter = 0
+        self.stable_display = None
+
+        # Improve detection parameters
+        self.confidence_threshold = 0.3  # Lower threshold for better detection
+        self.smoothing_factor = 0.2  # More responsive
+        self.frame_skip = 1  # Process every frame
+        self.buffer_size = 5  # Increased buffer size
+
+        # Add gesture stability
+        self.gesture_buffer = []
+        self.max_gesture_buffer = 5
+
     def recognize_asl(self, landmarks):
         if self.asl_model is None:
             return None
         try:
+            # Skip frames for performance
+            self.frame_count = (self.frame_count + 1) % self.frame_skip
+            if self.frame_count != 0:
+                return self.detection_buffer[-1] if self.detection_buffer else None
+
             normalized_landmarks = self._normalize_landmarks(landmarks)
             X_train = np.array(self.asl_model['X_train'])
             y_train = np.array(self.asl_model['y_train'])
@@ -93,10 +121,22 @@ class HandGestureDetector:
             predicted_letter = max(label_weights, key=label_weights.get)
             total_weight = sum(label_weights.values())
             confidence = label_weights[predicted_letter] / total_weight if total_weight > 0 else 0
-            if confidence > 0.6:
+            
+            # Adjust confidence threshold
+            if confidence > self.confidence_threshold:
+                # Update detection buffer
+                self.detection_buffer.append(predicted_letter)
+                if len(self.detection_buffer) > self.buffer_size:
+                    self.detection_buffer.pop(0)
+                
+                # Return most common letter in buffer
+                if len(self.detection_buffer) >= 2:
+                    from collections import Counter
+                    return Counter(self.detection_buffer).most_common(1)[0][0]
                 return predicted_letter
             else:
                 return None
+
         except Exception as e:
             print(f"Error in ASL recognition: {e}")
             return None
@@ -135,6 +175,11 @@ class HandGestureDetector:
         return np.array(angles)
 
     def detect_gestures(self, image):
+        # Skip frames for better performance
+        self.frame_count = (self.frame_count + 1) % self.frame_skip
+        if self.frame_count != 0:
+            return self.last_hands_data if hasattr(self, 'last_hands_data') else []
+
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         results = self.hands.process(image_rgb)
         hands_data = []
@@ -160,9 +205,30 @@ class HandGestureDetector:
                     'gestures': detected_gestures,
                     'asl_letter': asl_letter
                 })
+            self.last_hands_data = hands_data
+            if hands_data:
+                self.gesture_buffer.append(hands_data[0])
+                if len(self.gesture_buffer) > self.max_gesture_buffer:
+                    self.gesture_buffer.pop(0)
+                
+                # Use most common detection from buffer
+                if self.gesture_buffer:
+                    asl_letters = [g.get('asl_letter') for g in self.gesture_buffer if g.get('asl_letter')]
+                    if asl_letters:
+                        from collections import Counter
+                        most_common = Counter(asl_letters).most_common(1)[0][0]
+                        hands_data[0]['asl_letter'] = most_common
+                        self.last_detection = hands_data
+                        self.detection_counter = self.display_persistence
+            
+        elif self.detection_counter > 0:
+            # Keep showing last detection for persistence frames
+            self.detection_counter -= 1
+            hands_data = self.last_detection
         else:
-            self.previous_landmarks = []
-        return hands_data
+            self.last_detection = None
+            
+        return hands_data if hands_data else []
 
     def _smooth_landmarks(self, current_landmarks, previous_landmarks):
         smoothed_landmarks = []
@@ -178,44 +244,50 @@ class HandGestureDetector:
 
     def draw_landmarks(self, image, hands_data, results):
         output_image = image.copy()
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                self.mp_drawing.draw_landmarks(
-                    output_image,
-                    hand_landmarks,
-                    self.mp_hands.HAND_CONNECTIONS,
-                    landmark_drawing_spec=self.mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=5, circle_radius=5),
-                    connection_drawing_spec=self.mp_drawing.DrawingSpec(color=(255, 255, 0), thickness=3)
-                )
-        for idx, hand_data in enumerate(hands_data):
-            wrist = hand_data['landmarks'][0]
-            wrist_pos = (int(wrist['x'] * output_image.shape[1]), int(wrist['y'] * output_image.shape[0]))
-            text_bg_color = (0, 0, 0)
-            text_bg_alpha = 0.5
-            text_padding = 10
-            text_y_offset = 30
-            if hand_data.get('asl_letter'):
-                asl_text = f"ASL: {hand_data['asl_letter']}"
-                text_size = cv2.getTextSize(asl_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
-                asl_text_pos = (wrist_pos[0], wrist_pos[1] - text_y_offset)
-                bg_rect_pt1 = (asl_text_pos[0] - text_padding, asl_text_pos[1] - text_size[1] - text_padding)
-                bg_rect_pt2 = (asl_text_pos[0] + text_size[0] + text_padding, asl_text_pos[1] + text_padding)
-                overlay = output_image.copy()
-                cv2.rectangle(overlay, bg_rect_pt1, bg_rect_pt2, text_bg_color, -1)
-                output_image = cv2.addWeighted(overlay, text_bg_alpha, output_image, 1 - text_bg_alpha, 0)
-                cv2.putText(output_image, asl_text, asl_text_pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-                text_y_offset += 40
-            if hand_data['gestures']:
-                for i, gesture in enumerate(hand_data['gestures']):
-                    gesture_text = f"{hand_data['hand_label']}: {gesture}"
-                    text_size = cv2.getTextSize(gesture_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-                    text_pos = (wrist_pos[0], wrist_pos[1] - text_y_offset + (i * 35))
-                    bg_rect_pt1 = (text_pos[0] - text_padding, text_pos[1] - text_size[1] - text_padding)
-                    bg_rect_pt2 = (text_pos[0] + text_size[0] + text_padding, text_pos[1] + text_padding)
+        
+        # Draw persistent display
+        if not results.multi_hand_landmarks and self.last_detection:
+            hands_data = self.last_detection
+            
+        if hands_data:
+            if results.multi_hand_landmarks:
+                for hand_landmarks in results.multi_hand_landmarks:
+                    self.mp_drawing.draw_landmarks(
+                        output_image,
+                        hand_landmarks,
+                        self.mp_hands.HAND_CONNECTIONS,
+                        landmark_drawing_spec=self.mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=5, circle_radius=5),
+                        connection_drawing_spec=self.mp_drawing.DrawingSpec(color=(255, 255, 0), thickness=3)
+                    )
+            for idx, hand_data in enumerate(hands_data):
+                wrist = hand_data['landmarks'][0]
+                wrist_pos = (int(wrist['x'] * output_image.shape[1]), int(wrist['y'] * output_image.shape[0]))
+                text_bg_color = (0, 0, 0)
+                text_bg_alpha = 0.5
+                text_padding = 10
+                text_y_offset = 30
+                if hand_data.get('asl_letter'):
+                    asl_text = f"ASL: {hand_data['asl_letter']}"
+                    text_size = cv2.getTextSize(asl_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
+                    asl_text_pos = (wrist_pos[0], wrist_pos[1] - text_y_offset)
+                    bg_rect_pt1 = (asl_text_pos[0] - text_padding, asl_text_pos[1] - text_size[1] - text_padding)
+                    bg_rect_pt2 = (asl_text_pos[0] + text_size[0] + text_padding, asl_text_pos[1] + text_padding)
                     overlay = output_image.copy()
                     cv2.rectangle(overlay, bg_rect_pt1, bg_rect_pt2, text_bg_color, -1)
                     output_image = cv2.addWeighted(overlay, text_bg_alpha, output_image, 1 - text_bg_alpha, 0)
-                    cv2.putText(output_image, gesture_text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(output_image, asl_text, asl_text_pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+                    text_y_offset += 40
+                if hand_data['gestures']:
+                    for i, gesture in enumerate(hand_data['gestures']):
+                        gesture_text = f"{hand_data['hand_label']}: {gesture}"
+                        text_size = cv2.getTextSize(gesture_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+                        text_pos = (wrist_pos[0], wrist_pos[1] - text_y_offset + (i * 35))
+                        bg_rect_pt1 = (text_pos[0] - text_padding, text_pos[1] - text_size[1] - text_padding)
+                        bg_rect_pt2 = (text_pos[0] + text_size[0] + text_padding, text_pos[1] + text_padding)
+                        overlay = output_image.copy()
+                        cv2.rectangle(overlay, bg_rect_pt1, bg_rect_pt2, text_bg_color, -1)
+                        output_image = cv2.addWeighted(overlay, text_bg_alpha, output_image, 1 - text_bg_alpha, 0)
+                        cv2.putText(output_image, gesture_text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         return output_image
 
     def detect_faces(self, image):
@@ -381,8 +453,8 @@ def main():
 
     detector = HandGestureDetector(
         static_image_mode=False,
-        min_detection_confidence=0.7,
-        min_tracking_confidence=0.7,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.3,
         model_path=model_path
     )
     
@@ -408,10 +480,10 @@ def main():
     current_word = ""
     last_letter = None
     letter_stability_count = 0
-    required_stability = 10  # frames needed for stable detection
+    required_stability = 5  # Reduced from 10
     last_letter_time = time.time()
-    letter_timeout = 1.0
-    word_timeout = 3.0
+    letter_timeout = 0.5    # Reduced from 1.0
+    word_timeout = 2.0      # Reduced from 3.0
     last_word_time = time.time()
     prev_hand_landmarks = None
 
@@ -424,8 +496,10 @@ def main():
         while True:
             ret, frame = cap.read()
             if not ret:
-                print("Failed to capture frame from camera. Check camera connection.")
-                break
+                continue
+                
+            # Optimize frame size for better performance
+            frame = cv2.resize(frame, (640, 480))
             frame = cv2.flip(frame, 1)
             results = detector.hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             
@@ -537,16 +611,6 @@ def main():
                     speak(current_word)
                     current_word = ""
                     last_word_time = current_time
-                
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('x') and current_sentence:
-                    # Speak the entire sentence without pauses
-                    sentence_to_speak = current_sentence + current_word
-                    sentence_to_speak = sentence_to_speak.strip()  # Remove trailing spaces
-                    if sentence_to_speak:
-                        print(f"Speaking full sentence: {sentence_to_speak}")
-                        speak(sentence_to_speak)
-
                 cv2.imshow('Hand Gesture Recognition', output_frame)
 
             # ---------------- Normal Mode ----------------
@@ -563,7 +627,7 @@ def main():
                 else:
                     cv2.putText(output_frame, "ASL Recognition Active", (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(output_frame, "Press 'q' to quit, 'f' for face detection, 't' for training, 's' for sentence mode, 'x' to speak sentence",
+                cv2.putText(output_frame, "Press 'q' to quit, 'f' for face detection, 't' for training, 's' for sentence mode",
                             (10, output_frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 
                 # In normal mode, require 15 seconds of stability in letter detection before speaking the letter.
